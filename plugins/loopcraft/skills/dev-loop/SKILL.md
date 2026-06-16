@@ -27,9 +27,9 @@ TDD, non-negotiable, at EVERY layer the change touches (unit/integration/e2e): f
 ## Step 3 — Harden via Workflow (deterministic review → adjudicate → fix → re-verify)
 Launch the `Workflow` below (inline `script`), passing `args` as a JSON object:
 ```json
-{ "criteria": "<the task + what 'done' looks like>", "verifyCommands": ["<exact test cmd>", "<exact lint cmd>"], "maxRounds": 3, "effort": "high", "adjudicators": 2, "crossModel": "fable" }
+{ "criteria": "<the task + what 'done' looks like>", "verifyCommands": ["<exact test cmd>", "<exact lint cmd>"], "maxRounds": 3, "effort": "high", "adjudicators": 2 }
 ```
-Use the commands you recorded in Step 0 for `verifyCommands`. `adjudicators` (default 2) is how many independent votes each finding gets before it's accepted — a finding is kept only if a strict majority of votes call it real, which filters false positives. `crossModel` (default `"fable"`) runs one reviewer lens and every other adjudication vote on a **different model family**, so the panel isn't pure same-model self-critique; set it to `""` to disable, or `"sonnet"`/`"opus"` if Fable is unavailable. The Workflow runs in the **background**; wait for the completion notification (don't poll). Its reviewers and fixer run as fresh sessions and edit the working tree while you wait — so do not edit files yourself until it returns.
+Use the commands you recorded in Step 0 for `verifyCommands`. `adjudicators` (default 2) is how many independent votes each finding gets before it's accepted — a finding is kept only if a strict majority of votes call it real, which filters false positives. The secondary "cross-check" model (one reviewer lens + the alternate adjudication votes) is **auto-resolved**: at startup the Workflow probes a ranked preference (highest first — currently `fable → opus → sonnet → haiku`) and uses the best one that actually responds, so a retired model never breaks the run (the resolved model is logged). Override with `crossModel`: a single model name to force one, an array for a custom ranked chain, or `""` to disable. When the resolved model differs from the session model you get real diversity; when only one family is available the cross-check is simply a second independent vote. The Workflow runs in the **background**; wait for the completion notification (don't poll). Its reviewers and fixer run as fresh sessions and edit the working tree while you wait — so do not edit files yourself until it returns.
 
 > Scope note the Workflow honours: it runs **automated** tests/lint only. It does NOT do live UI e2e or anything needing an interactive login — that stays yours (Steps 2 and 4).
 
@@ -39,6 +39,7 @@ export const meta = {
   name: 'dev-loop-harden',
   description: 'Fresh-reviewer review -> consensus + cross-model adjudication -> fix -> re-verify loop over a working-tree diff',
   phases: [
+    { title: 'Preflight', detail: 'probe for the highest available cross-check model' },
     { title: 'Review', detail: 'fresh independent reviewers on the diff' },
     { title: 'Verify', detail: 'adjudicate findings + run automated tests/lint' },
     { title: 'Fix', detail: 'apply confirmed findings + failing checks' },
@@ -51,11 +52,19 @@ const effort = A.effort || 'high'
 const criteria = (A.criteria || '').trim()
 const verifyCommands = Array.isArray(A.verifyCommands) ? A.verifyCommands : []
 const adjudicators = A.adjudicators || 2
-// Cross-model reviewer to escape shared-model bias (same-model panels are self-critique, not
-// independent verification). Default to a different family (Fable); set crossModel:'' to disable,
-// or to 'sonnet'/'opus' if Fable is unavailable. (Cross-VENDOR review, e.g. GPT/Codex, is not
-// reachable from a workflow — wire it as an external reviewer if you need it.)
-const CROSS_MODEL = 'crossModel' in A ? A.crossModel : 'fable'
+// Secondary model for the cross-check reviewer lens + alternate adjudication votes. Do NOT hardcode a
+// model name — a named model that gets retired (e.g. Fable) would break every run. Instead keep a
+// ranked preference (highest first) and PROBE at startup for the best one actually available; put any
+// new top-tier model at the FRONT of this list. crossModel arg overrides: '' disables, a string forces
+// one model, an array supplies a custom ranked chain. (Cross-VENDOR review, e.g. GPT/Codex, is not
+// reachable from a workflow.)
+const DEFAULT_MODEL_PREFERENCE = ['fable', 'opus', 'sonnet', 'haiku']
+let modelPreference
+if (A.crossModel === '') modelPreference = []
+else if (Array.isArray(A.crossModel)) modelPreference = A.crossModel
+else if (typeof A.crossModel === 'string' && A.crossModel) modelPreference = [A.crossModel]
+else modelPreference = DEFAULT_MODEL_PREFERENCE
+let crossModel = null
 
 const DIFF_SCHEMA = {
   type: 'object', additionalProperties: false, required: ['diff'],
@@ -151,10 +160,22 @@ function voteThunks(f, diff) {
   const thunks = []
   for (let i = 0; i < adjudicators; i += 1) {
     const opts = { schema: VERDICT_SCHEMA, phase: 'Verify', label: 'adjudicate' }
-    if (i % 2 === 1 && CROSS_MODEL) opts.model = CROSS_MODEL
+    if (i % 2 === 1 && crossModel) opts.model = crossModel
     thunks.push(() => agent(adjudicatePrompt(f, diff), opts))
   }
   return thunks
+}
+
+async function resolveCrossModel(pref) {
+  for (let i = 0; i < pref.length; i += 1) {
+    try {
+      const reply = await agent('Reply with exactly: OK', { model: pref[i], label: `probe:${pref[i]}`, phase: 'Preflight' })
+      if (reply) return pref[i]
+    } catch (e) {
+      // model unavailable or invalid — fall through to the next in the preference list
+    }
+  }
+  return null
 }
 
 let stopReason = 'reached round cap with problems still open'
@@ -162,6 +183,11 @@ let roundsRun = 0
 const changelog = []
 const openMinor = []
 const seenMinor = {}
+
+crossModel = await resolveCrossModel(modelPreference)
+log(crossModel
+  ? `cross-check model resolved to '${crossModel}' (highest available in preference ${JSON.stringify(modelPreference)})`
+  : 'no cross-check model available/enabled — reviewers and adjudicators run on the session model (consensus is same-model)')
 
 for (let round = 1; round <= maxRounds; round += 1) {
   roundsRun = round
@@ -172,7 +198,7 @@ for (let round = 1; round <= maxRounds; round += 1) {
   const reviews = (
     await parallel(LENSES.map((l) => () => {
       const opts = { schema: REVIEW_SCHEMA, phase: 'Review', label: `review:${l.key}` }
-      if (l.key === 'simplicity' && CROSS_MODEL) opts.model = CROSS_MODEL
+      if (l.key === 'simplicity' && crossModel) opts.model = crossModel
       return agent(reviewPrompt(l, diff), opts)
     }))
   ).filter((r) => !!r)
