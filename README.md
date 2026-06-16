@@ -39,4 +39,4 @@ Installed skills are namespaced by plugin, e.g. `/loopcraft:plan-loop`.
 Rigor-focused skills — plans grounded in real code, loops that iterate until verified-clean.
 
 - **plan-loop** — hybrid plan builder: clarify scope → divergent planners + judge → loop[verify-against-code + review → fix] until claims check out and reviews are clean. Args: `--planners N`, `--rounds N`, `--stop-after-clean K`, `--reviewers M`, `--no-clarify`, `--out path`.
-- **dev-loop** — autonomous implement → verify (unit/integration/e2e) → code-review → fix loop until an independent review is clean. Project-agnostic: detects the stack and test commands from the repo. Args: `--effort low|medium|high|max`, `--max-loops N`.
+- **dev-loop** — hybrid implement loop: the main agent implements + runs live e2e (and can pause for a login), then hands the diff to a background Workflow that runs review → adjudicate → fix → re-verify with fresh independent reviewers until clean; the main agent re-verifies live. Project-agnostic. Args: `--effort low|medium|high|max`, `--max-loops N`.
