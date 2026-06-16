@@ -1,10 +1,11 @@
 {
-  "name": "my-tools-marketplace",
+  "name": "loopcraft-marketplace",
+  "owner": { "name": "deva" },
   "plugins": [
     {
-      "name": "my-tools",
-      "source": { "type": "local", "path": "./plugins/my-tools" },
-      "description": "Personal Claude Code skills and commands"
+      "name": "loopcraft",
+      "source": { "type": "local", "path": "./plugins/loopcraft" },
+      "description": "Rigor-focused Claude Code skills: code-grounded planning and verify-until-clean dev loops"
     }
   ]
 }
