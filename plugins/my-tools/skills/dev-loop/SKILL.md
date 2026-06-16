@@ -53,11 +53,14 @@ Invoke a code-review skill/agent if the environment provides one, at the chosen 
 - You may NOT unilaterally reject a finding about code you wrote. If you believe a finding is invalid, spawn a fresh reviewer subagent (Agent tool, general-purpose) whose prompt contains only: the finding, the relevant code/diff excerpt, and your counter-argument. That subagent's verdict is final: if it upholds the finding, fix it; if it agrees it is invalid, record the finding, your reasoning, and the adjudicator's verdict for the report.
 - If any code changed, return to Step 2.
 
-### Step 5 — Final independent review (fresh session)
-Once Step 3 returns no findings (or every remaining finding was adjudicated invalid), run one review in a completely separate headless session:
+### Step 5 — Final independent review (fresh, independent context)
+Once Step 3 returns no findings (or every remaining finding was adjudicated invalid), run ONE review in a fresh context that never saw the implementation reasoning. Pick the mechanism by what's available:
+
 1. Collect the full change set: `git diff HEAD` plus the full content of any untracked new files (`git status --porcelain` to find them).
-2. Pipe it to a new session: `git diff HEAD | claude -p "Review this diff for correctness bugs, security issues, and anything blocking merge. The repo is at <repo root>; read surrounding files for context if needed. Reply with a numbered list of concrete findings, or exactly CLEAN if none." --allowedTools "Read,Grep,Glob"` (append untracked-file contents to the piped input).
-3. If it replies CLEAN: the loop is done.
+2. Check whether the `claude` CLI is on PATH (e.g. `command -v claude`).
+   - **If available — headless session (preferred):** pipe the change set to a new session: `git diff HEAD | claude -p "Review this diff for correctness bugs, security issues, and anything blocking merge. The repo is at <repo root>; read surrounding files for context if needed. Reply with a numbered list of concrete findings, or exactly CLEAN if none." --allowedTools "Read,Grep,Glob"` (append untracked-file contents to the piped input).
+   - **If NOT available — in-session fresh subagent (fallback):** spawn a fresh reviewer via the Agent tool (`general-purpose`) whose prompt contains ONLY the change set (diff + untracked-file contents), the repo root path, and the same instruction (find concrete correctness/security/merge-blocking issues; reply with a numbered list or exactly CLEAN). It gets none of your implementation reasoning, so it reviews independently.
+3. If the chosen reviewer replies CLEAN: the loop is done.
 4. If it returns findings: treat them exactly like Step 3 findings (Step 4 rules apply) and return to Step 2. This counts as a new round against `--max-loops`.
 
 ### Step 6 — Terminate
