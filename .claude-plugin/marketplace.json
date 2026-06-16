@@ -1,0 +1,10 @@
+{
+  "name": "my-tools-marketplace",
+  "plugins": [
+    {
+      "name": "my-tools",
+      "source": { "type": "local", "path": "./plugins/my-tools" },
+      "description": "Personal Claude Code skills and commands"
+    }
+  ]
+}
