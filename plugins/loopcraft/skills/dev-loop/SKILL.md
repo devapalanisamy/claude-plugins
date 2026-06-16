@@ -14,6 +14,8 @@ Parse: the task description (everything that is not a flag); `--effort <low|medi
 ## Step 0 — Orient to THIS repo
 Read `CLAUDE.md` / `AGENTS.md` / `README` and any contributing guide — **project conventions override this skill.** Detect the real test/lint commands from `package.json` scripts, `Makefile`, `pyproject.toml`, `pubspec.yaml`, CI config, etc. Note env/safety rules (off-limits branches/envs, how to run a local/sandbox env, how to get test credentials). **Record the exact automated test + lint commands you find — you will pass them to the Workflow in Step 3.**
 
+**Optional deterministic lint gate (recommended):** loopcraft ships a `PostToolUse` hook that, *only* if the repo root contains a `.loopcraft.json` with a `lintCommand`, runs that lint after every edit and blocks (returns the errors to fix) on failure — a harness-enforced gate that doesn't depend on the model remembering to lint. To enable it in this repo, drop a `.loopcraft.json` like `{ "lintCommand": "<fast lint of changed files>" }` (keep it fast — it runs on every edit). If the file is absent the hook is a no-op, so it never disrupts other repos.
+
 ## Step 1 — Implement (you, interactively)
 TDD, non-negotiable, at EVERY layer the change touches (unit/integration/e2e): failing test first (a new/changed user-facing flow gets a failing e2e/integration test first, not unit alone), confirm it fails for the right reason, minimum code to pass, refactor. Bug fixes reproduce with a failing test before patching. If a matching specialized implementation skill/agent exists, route through it; else implement directly. Minimum code, touch only what you must, follow the repo's own style.
 
@@ -25,9 +27,9 @@ TDD, non-negotiable, at EVERY layer the change touches (unit/integration/e2e): f
 ## Step 3 — Harden via Workflow (deterministic review → adjudicate → fix → re-verify)
 Launch the `Workflow` below (inline `script`), passing `args` as a JSON object:
 ```json
-{ "criteria": "<the task + what 'done' looks like>", "verifyCommands": ["<exact test cmd>", "<exact lint cmd>"], "maxRounds": 3, "effort": "high" }
+{ "criteria": "<the task + what 'done' looks like>", "verifyCommands": ["<exact test cmd>", "<exact lint cmd>"], "maxRounds": 3, "effort": "high", "adjudicators": 2, "crossModel": "fable" }
 ```
-Use the commands you recorded in Step 0 for `verifyCommands`. The Workflow runs in the **background**; wait for the completion notification (don't poll). Its reviewers and fixer run as fresh sessions and edit the working tree while you wait — so do not edit files yourself until it returns.
+Use the commands you recorded in Step 0 for `verifyCommands`. `adjudicators` (default 2) is how many independent votes each finding gets before it's accepted — a finding is kept only if a strict majority of votes call it real, which filters false positives. `crossModel` (default `"fable"`) runs one reviewer lens and every other adjudication vote on a **different model family**, so the panel isn't pure same-model self-critique; set it to `""` to disable, or `"sonnet"`/`"opus"` if Fable is unavailable. The Workflow runs in the **background**; wait for the completion notification (don't poll). Its reviewers and fixer run as fresh sessions and edit the working tree while you wait — so do not edit files yourself until it returns.
 
 > Scope note the Workflow honours: it runs **automated** tests/lint only. It does NOT do live UI e2e or anything needing an interactive login — that stays yours (Steps 2 and 4).
 
@@ -35,7 +37,7 @@ Use the commands you recorded in Step 0 for `verifyCommands`. The Workflow runs 
 ```javascript
 export const meta = {
   name: 'dev-loop-harden',
-  description: 'Fresh-reviewer review -> adjudicate -> fix -> re-verify loop over a working-tree diff',
+  description: 'Fresh-reviewer review -> consensus + cross-model adjudication -> fix -> re-verify loop over a working-tree diff',
   phases: [
     { title: 'Review', detail: 'fresh independent reviewers on the diff' },
     { title: 'Verify', detail: 'adjudicate findings + run automated tests/lint' },
@@ -48,6 +50,12 @@ const maxRounds = A.maxRounds || 3
 const effort = A.effort || 'high'
 const criteria = (A.criteria || '').trim()
 const verifyCommands = Array.isArray(A.verifyCommands) ? A.verifyCommands : []
+const adjudicators = A.adjudicators || 2
+// Cross-model reviewer to escape shared-model bias (same-model panels are self-critique, not
+// independent verification). Default to a different family (Fable); set crossModel:'' to disable,
+// or to 'sonnet'/'opus' if Fable is unavailable. (Cross-VENDOR review, e.g. GPT/Codex, is not
+// reachable from a workflow — wire it as an external reviewer if you need it.)
+const CROSS_MODEL = 'crossModel' in A ? A.crossModel : 'fable'
 
 const DIFF_SCHEMA = {
   type: 'object', additionalProperties: false, required: ['diff'],
@@ -139,6 +147,16 @@ function verifyPrompt() {
   ].join('\n')
 }
 
+function voteThunks(f, diff) {
+  const thunks = []
+  for (let i = 0; i < adjudicators; i += 1) {
+    const opts = { schema: VERDICT_SCHEMA, phase: 'Verify', label: 'adjudicate' }
+    if (i % 2 === 1 && CROSS_MODEL) opts.model = CROSS_MODEL
+    thunks.push(() => agent(adjudicatePrompt(f, diff), opts))
+  }
+  return thunks
+}
+
 let stopReason = 'reached round cap with problems still open'
 let roundsRun = 0
 const changelog = []
@@ -152,7 +170,11 @@ for (let round = 1; round <= maxRounds; round += 1) {
   if (!diff) { stopReason = 'no changes in working tree to review'; break }
 
   const reviews = (
-    await parallel(LENSES.map((l) => () => agent(reviewPrompt(l, diff), { schema: REVIEW_SCHEMA, phase: 'Review', label: `review:${l.key}` })))
+    await parallel(LENSES.map((l) => () => {
+      const opts = { schema: REVIEW_SCHEMA, phase: 'Review', label: `review:${l.key}` }
+      if (l.key === 'simplicity' && CROSS_MODEL) opts.model = CROSS_MODEL
+      return agent(reviewPrompt(l, diff), opts)
+    }))
   ).filter((r) => !!r)
   const allFindings = reviews.flatMap((r) => r.findings || [])
   const candidate = allFindings.filter((f) => f.severity === 'blocker' || f.severity === 'major')
@@ -162,8 +184,11 @@ for (let round = 1; round <= maxRounds; round += 1) {
   })
 
   const judged = await parallel(candidate.map((f) => () =>
-    agent(adjudicatePrompt(f, diff), { schema: VERDICT_SCHEMA, phase: 'Verify', label: 'adjudicate' }).then((v) => ({ f, real: !!(v && v.real) }))))
-  const confirmed = judged.filter((x) => x && x.real).map((x) => x.f)
+    parallel(voteThunks(f, diff)).then((votes) => {
+      const realVotes = votes.filter((v) => v && v.real).length
+      return { f, keep: realVotes * 2 >= adjudicators }
+    })))
+  const confirmed = judged.filter((x) => x && x.keep).map((x) => x.f)
 
   const v = await agent(verifyPrompt(), { schema: VERIFY_SCHEMA, phase: 'Verify', label: `verify:round${round}` })
   const verifyOk = !!(v && v.passed)
