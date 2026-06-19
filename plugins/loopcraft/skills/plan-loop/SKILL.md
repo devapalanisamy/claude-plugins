@@ -113,7 +113,7 @@ const VERIFY_SCHEMA = {
         properties: {
           claim: { type: 'string' },
           verdict: { type: 'string', enum: ['confirmed', 'refuted', 'unverifiable'] },
-          evidence: { type: 'string', description: 'file:line or command output proving the verdict' },
+          evidence: { type: 'string', description: 'file:line, command output, or official doc URL proving the verdict' },
           correction: { type: 'string', description: 'the correct fact if refuted, else empty string' },
         },
       },
@@ -151,10 +151,19 @@ function panel(n) {
   return out
 }
 
+const DOC_GROUNDING = [
+  'GROUND EVERY FRAMEWORK / LIBRARY / SDK / EXTERNAL-API DETAIL IN CURRENT OFFICIAL DOCUMENTATION — never from training memory, which is stale and version-blind.',
+  'First identify the frameworks, libraries, SDKs and external APIs this change touches and their EXACT versions (from package.json / pubspec.yaml / requirements / go.mod / Gemfile and the lockfiles). Then consult the latest OFFICIAL docs for those versions:',
+  '- PREFER a documentation MCP when one is available for the stack (e.g. the dart/Flutter MCP server and its resources, a Context7-style docs server, or any framework-specific MCP) — use ToolSearch to discover such tools before falling back to the web.',
+  '- OTHERWISE use WebSearch/WebFetch restricted to OFFICIAL documentation sources only (e.g. api.flutter.dev / docs.flutter.dev, docs.amplify.aws, nextjs.org/docs, the library\'s own docs site, or its versioned GitHub README/CHANGELOG for the release in use).',
+  '- NEVER base an API signature, config option, default, or behaviour on Stack Overflow, blogs, forum posts, or unsourced AI answers. Cite the official doc URL (and the version it describes) next to any non-obvious API claim in the plan.',
+].join('\n')
+
 function planPrompt(framing) {
   return [
     'Produce a thorough, implementation-ready plan for the request below.',
     'Explore and research the codebase first — ground every step in how this repo actually works, citing file:line for load-bearing facts. Define clear success criteria. Do NOT implement; output only the plan.',
+    DOC_GROUNDING,
     'The plan MUST include an explicit TESTING section covering every layer the change touches (unit, integration, end-to-end). For the integration/e2e layer, specify the exact test data and CREDENTIALS the tests need and HOW to provision them — standing up a personal sandbox, creating temporary/throwaway test users (e.g. Cognito test users), seeding the data the flow needs, and which secrets/env vars are required — so an implementer can actually run e2e without being blocked. If a credential or test user is needed, say how to CREATE it; never assume it already exists. Missing credentials never justify skipping e2e.',
     `Framing for THIS plan: ${framing.angle}`,
     'Return the plan as well-structured markdown.',
@@ -167,6 +176,7 @@ function judgePrompt(candidates) {
   return [
     'You are synthesizing the SINGLE best implementation-ready plan from the candidate plans below, which were written from different framings.',
     'Take the strongest base and graft the best grounded ideas from the others. Where candidates contradict each other on a fact about the codebase, resolve it by checking the actual code (cite file:line). Drop ideas that are weak or unverifiable.',
+    'Where a candidate relies on a framework/library/external-API detail, confirm it against CURRENT OFFICIAL documentation for the version in use (prefer a docs MCP, else WebFetch the official docs site — never memory or unofficial sources) and keep the version-correct usage, citing the doc URL.',
     'The synthesized plan MUST retain an explicit TESTING section covering unit + integration + e2e, including how the e2e/integration tests provision credentials and test data (creating temporary test users, a sandbox, seed data, required secrets). If candidates differ here, keep the most concrete version.',
     'Define clear success criteria. Do NOT implement. Return ONE complete plan as markdown.',
     '', '--- REQUEST ---', request, blocks,
@@ -175,8 +185,8 @@ function judgePrompt(candidates) {
 
 function verifyPrompt(plan) {
   return [
-    'You are a FACT-CHECKER for a plan (not a reviewer of style). Extract the load-bearing factual claims the plan makes about THIS codebase — file paths, line numbers, function/field/table names, IAM grants, schema shapes, config values, and especially negative claims ("X does not exist", "Y has no access to Z"). Focus on the ~15 claims the plan\'s correctness most depends on; skip trivia.',
-    'For EACH claim, verify it by actually reading the referenced code (open the file, grep, check the resource). Return verdict confirmed | refuted | unverifiable, with concrete evidence (file:line or what you found). If refuted, put the CORRECT fact in `correction`. Be strict: if you cannot find supporting evidence, it is not "confirmed".',
+    'You are a FACT-CHECKER for a plan (not a reviewer of style). Extract the load-bearing factual claims the plan makes about THIS codebase — file paths, line numbers, function/field/table names, IAM grants, schema shapes, config values, and especially negative claims ("X does not exist", "Y has no access to Z") — AND the load-bearing claims it makes about external frameworks/libraries/APIs (method signatures, config options, defaults, version-specific behaviour, deprecations). Focus on the ~15 claims the plan\'s correctness most depends on; skip trivia.',
+    'For EACH claim, verify it against the AUTHORITATIVE source: codebase claims by actually reading the referenced code (open the file, grep, check the resource); framework/library/API claims against CURRENT OFFICIAL documentation for the version in use (prefer a docs MCP, else WebFetch the official docs site — never Stack Overflow, blogs, or memory). Return verdict confirmed | refuted | unverifiable, with concrete evidence (file:line, command output, or the official doc URL). If refuted, put the CORRECT fact in `correction`. Be strict: if you cannot find supporting evidence, it is not "confirmed"; a claim that contradicts the official docs is refuted.',
     '', '--- PLAN ---', plan,
   ].join('\n')
 }
@@ -333,6 +343,7 @@ Only implement if the user explicitly approves.
 ## Notes
 
 - **Verification is the core value.** A refuted claim is treated as a blocker, so the plan cannot finalize while it asserts something the code contradicts. "Clean" here means *both* "no blocker/major review findings" *and* "no refuted claims" — a real signal, not reviewer fatigue.
+- **Documentation grounding.** Planners, the judge, and the fact-checker all ground framework/library/API details in *current official documentation* for the version in use (preferring a docs MCP, falling back to WebFetch of official doc sites) rather than training memory — and a claim that contradicts the official docs is refuted just like a wrong file:line. This keeps plans from baking in stale or hallucinated API usage.
 - **Divergence costs more up front, less overall.** ~`planners` + 1 judge + per round `(1 verify + reviewers + 1 fix)`. Defaults (3 planners + judge + up to 3 rounds × ~3) ≈ 13–16 sessions — front-loaded into quality (divergence + verification) rather than spent on repeated subjective review.
 - Verify and review run **in parallel** each round; reviewers are told the fact-checker covers file:line accuracy so they don't duplicate it.
 - The churn guard stops honest dead-ends instead of burning the full cap on edits that no longer move the plan.

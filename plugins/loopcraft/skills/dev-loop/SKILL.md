@@ -12,12 +12,14 @@ $ARGUMENTS
 Parse: the task description (everything that is not a flag); `--effort <low|medium|high|max>` (review depth, default `high`); `--max-loops <N>` (max workflow rounds, default `3`).
 
 ## Step 0 — Orient to THIS repo
-Read `CLAUDE.md` / `AGENTS.md` / `README` and any contributing guide — **project conventions override this skill.** Detect the real test/lint commands from `package.json` scripts, `Makefile`, `pyproject.toml`, `pubspec.yaml`, CI config, etc. Note env/safety rules (off-limits branches/envs, how to run a local/sandbox env, how to get test credentials). **Record the exact automated test + lint commands you find — you will pass them to the Workflow in Step 3.**
+Read `CLAUDE.md` / `AGENTS.md` / `README` and any contributing guide — **project conventions override this skill.** Detect the real test/lint commands from `package.json` scripts, `Makefile`, `pyproject.toml`, `pubspec.yaml`, CI config, etc. Note env/safety rules (off-limits branches/envs, how to run a local/sandbox env, how to get test credentials). **Record the exact automated test + lint commands you find — you will pass them to the Workflow in Step 3.** Also identify the frameworks/libraries/SDKs the change will touch and their EXACT versions (from the manifests + lockfiles), and line up where to read their *current official docs* for Step 1 — a docs MCP if one is available for the stack (e.g. the dart/Flutter MCP, a Context7-style server; discover via ToolSearch), otherwise the official doc domains. You will code against those docs, not from memory.
 
 **Optional deterministic lint gate (recommended):** loopcraft ships a `PostToolUse` hook that, *only* if the repo root contains a `.loopcraft.json` with a `lintCommand`, runs that lint after every edit and blocks (returns the errors to fix) on failure — a harness-enforced gate that doesn't depend on the model remembering to lint. To enable it in this repo, drop a `.loopcraft.json` like `{ "lintCommand": "<fast lint of changed files>" }` (keep it fast — it runs on every edit). If the file is absent the hook is a no-op, so it never disrupts other repos.
 
 ## Step 1 — Implement (you, interactively)
 TDD, non-negotiable, at EVERY layer the change touches (unit/integration/e2e): failing test first (a new/changed user-facing flow gets a failing e2e/integration test first, not unit alone), confirm it fails for the right reason, minimum code to pass, refactor. Bug fixes reproduce with a failing test before patching. If a matching specialized implementation skill/agent exists, route through it; else implement directly. Minimum code, touch only what you must, follow the repo's own style.
+
+**Code against current official docs, not memory.** Before using any framework/library/SDK/external API you are not 100% current on, consult its LATEST OFFICIAL documentation for the version in use (from Step 0): prefer a docs MCP for the stack (e.g. the dart/Flutter MCP server, a Context7-style server), else WebSearch/WebFetch restricted to official doc domains (e.g. api.flutter.dev / docs.flutter.dev, docs.amplify.aws, nextjs.org/docs, the library's own docs site or versioned README/CHANGELOG). Never take API signatures, config, defaults, or behaviour from Stack Overflow, blogs, or unsourced answers.
 
 ## Step 2 — Live verify (you, interactively — the part a background Workflow cannot do)
 - Run the project's automated suites at all applicable layers (unit/integration) and lint/typecheck. Fix failures (failing test first for bug-class) before continuing.
@@ -98,7 +100,7 @@ const VERIFY_SCHEMA = {
 }
 
 const LENSES = [
-  { key: 'correctness', focus: 'CORRECTNESS & BUGS — logic errors, wrong edge-case handling, off-by-one, null/undefined, race conditions, broken contracts, regressions vs the code being changed.' },
+  { key: 'correctness', focus: 'CORRECTNESS & BUGS — logic errors, wrong edge-case handling, off-by-one, null/undefined, race conditions, broken contracts, regressions vs the code being changed. Also flag framework/library/API usage that contradicts the CURRENT OFFICIAL documentation for the version in use (deprecated/removed/renamed APIs, wrong signatures, invalid config/defaults) — confirm against official docs (prefer a docs MCP, else the official docs site), not memory.' },
   { key: 'security', focus: 'SECURITY & DATA — injection, missing authz/authn, unsafe deserialization, secret/PII leakage, unvalidated input, unsafe defaults.' },
   { key: 'tests', focus: 'TESTS & COVERAGE — was the change made TDD (failing test first)? Are the new/changed paths actually covered at the right layer? Are tests meaningful (not asserting trivia / not over-mocked)? Flag missing integration/e2e coverage for user-facing changes.' },
   { key: 'simplicity', focus: 'SIMPLICITY, REUSE & CONVENTIONS — duplication, dead code, needless complexity, ignoring an existing helper, and violations of the repo conventions (read CLAUDE.md/AGENTS.md). Flag comments that state WHAT instead of WHY if the repo forbids them.' },
@@ -121,7 +123,7 @@ function reviewPrompt(lens, diff) {
     effortNote(effort),
     `Your lens: ${lens.focus}`,
     criteria ? `What the change is supposed to do: ${criteria}` : '',
-    'Read the diff below; open surrounding files in the repo as needed to judge correctly. Report ONLY issues in your lens, each with severity, area, file, the concrete problem, and a specific suggested fix.',
+    'Read the diff below; open surrounding files in the repo as needed to judge correctly. When the change leans on a framework/library/external API, confirm its usage against the CURRENT OFFICIAL documentation for the version in use (prefer a docs MCP, else WebFetch the official docs site) rather than memory. Report ONLY issues in your lens, each with severity, area, file, the concrete problem, and a specific suggested fix.',
     '', '--- CHANGE SET (diff + untracked files) ---', diff,
   ].join('\n')
 }
@@ -139,7 +141,7 @@ function adjudicatePrompt(f, diff) {
 function fixPrompt(problems) {
   const list = problems.map((p, i) => `${i + 1}. [${p.severity}] (${p.area}) ${p.file} — ${p.problem}\n   Suggested fix: ${p.suggested_fix}`).join('\n')
   return [
-    'Apply fixes to the working tree for the confirmed problems below. Follow the repo conventions (read CLAUDE.md/AGENTS.md first). TDD for bug-class problems: add/repair a failing test first, then fix. Keep changes minimal; do not rewrite unrelated code. Do not git commit.',
+    'Apply fixes to the working tree for the confirmed problems below. Follow the repo conventions (read CLAUDE.md/AGENTS.md first). TDD for bug-class problems: add/repair a failing test first, then fix. For any framework/library/API involved in a fix, ground the corrected usage in CURRENT OFFICIAL documentation for the version in use (prefer a docs MCP, else the official docs site) — not memory or unofficial sources. Keep changes minimal; do not rewrite unrelated code. Do not git commit.',
     'After editing, briefly state what you changed.',
     '', '--- CONFIRMED PROBLEMS ---', list,
   ].join('\n')
