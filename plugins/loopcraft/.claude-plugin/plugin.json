@@ -1,6 +1,6 @@
 {
   "name": "loopcraft",
   "description": "Rigor-focused Claude Code skills: code-grounded, docs-grounded planning (plan-loop) and verify-until-clean dev loops (dev-loop)",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "author": { "name": "Deva" }
 }
